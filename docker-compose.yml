@@ -1,0 +1,23 @@
+services:
+  mcproute:
+    build:
+      context: .
+    image: mcproute:local
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    # Only these variables are passed in; PORT, HOST and DATABASE_PATH are fixed by the image
+    # so a local-dev .env (e.g. a relative DATABASE_PATH) cannot move the database off the volume.
+    environment:
+      MASTER_KEY: ${MASTER_KEY:?Set MASTER_KEY in .env (generate one with `openssl rand -hex 32`)}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TRUST_PROXY: ${TRUST_PROXY:-false}
+      COOKIE_SECURE: ${COOKIE_SECURE:-auto}
+    volumes:
+      - mcproute-data:/data
+
+volumes:
+  mcproute-data:

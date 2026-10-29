@@ -1,0 +1,20 @@
+{
+  "name": "mcproute",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted gateway that aggregates upstream MCP servers behind managed endpoints with per-session API key rotation.",
+  "type": "module",
+  "packageManager": "pnpm@10.34.2",
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "scripts": {
+    "dev": "pnpm -r --parallel run dev",
+    "build": "pnpm -r run build",
+    "start": "pnpm --filter @mcproute/server run start",
+    "db:generate": "pnpm --filter @mcproute/server run db:generate",
+    "db:migrate": "pnpm --filter @mcproute/server run db:migrate",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck"
+  }
+}
