@@ -1,0 +1,1 @@
+ALTER TABLE `proxies` ADD `last_exit_ip` text;

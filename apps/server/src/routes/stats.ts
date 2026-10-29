@@ -1,13 +1,21 @@
-import type { StatsOverviewDto } from '@mcproute/shared';
+import {
+  statsTimeseriesQuerySchema,
+  type RequestTimeseriesDto,
+  type StatsOverviewDto,
+} from '@mcproute/shared';
 import { and, count, eq, gt, gte, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AppContext } from '../context';
 import { apiKeys, providers, proxies, requestLogs, sessions } from '../db/schema';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
 
 const countWhere = (condition: SQL | undefined) =>
   sql<number>`coalesce(sum(case when ${condition} then 1 else 0 end), 0)`.mapWith(Number);
+
+// created_at is stored in epoch milliseconds; an inlined integer literal keeps this an integer division.
+const hourBucket = sql<number>`(${requestLogs.createdAt} / ${sql.raw(String(HOUR_MS))})`.mapWith(Number);
 
 export function statsRoutes({ db }: AppContext): FastifyPluginAsync {
   return async (app) => {
@@ -71,6 +79,29 @@ export function statsRoutes({ db }: AppContext): FastifyPluginAsync {
           error: requestErrors,
           errorRate: requestTotal === 0 ? 0 : Math.round((requestErrors / requestTotal) * 10_000) / 10_000,
         },
+      };
+    });
+
+    /** Hour-aligned request counts for the dashboard chart; missing hours are returned as zeros. */
+    app.get('/stats/timeseries', async (request): Promise<RequestTimeseriesDto> => {
+      const { hours } = statsTimeseriesQuerySchema.parse(request.query);
+      const firstBucket = Math.floor(Date.now() / HOUR_MS) - (hours - 1);
+      const rows = db
+        .select({ bucket: hourBucket, total: count(), error: countWhere(eq(requestLogs.status, 'error')) })
+        .from(requestLogs)
+        .where(gte(requestLogs.createdAt, new Date(firstBucket * HOUR_MS)))
+        .groupBy(hourBucket)
+        .all();
+      const byBucket = new Map(rows.map((row) => [row.bucket, row]));
+
+      return {
+        bucketMinutes: 60,
+        buckets: Array.from({ length: hours }, (_, index) => {
+          const bucket = firstBucket + index;
+          const total = byBucket.get(bucket)?.total ?? 0;
+          const error = byBucket.get(bucket)?.error ?? 0;
+          return { start: new Date(bucket * HOUR_MS).toISOString(), total, ok: total - error, error };
+        }),
       };
     });
   };

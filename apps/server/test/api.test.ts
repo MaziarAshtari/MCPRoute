@@ -406,14 +406,20 @@ describe('proxies', () => {
     const proxy = (await t.api('POST', '/api/proxies', { url: '5.5.5.5:8080' })).json;
     t.database.db
       .update(proxies)
-      .set({ status: 'ok', lastLatencyMs: 42, lastCheckedAt: new Date() })
+      .set({ status: 'ok', lastLatencyMs: 42, lastExitIp: '198.51.100.4', lastCheckedAt: new Date() })
       .where(eq(proxies.id, proxy.id))
       .run();
 
     const relabeled = await t.api('PATCH', `/api/proxies/${proxy.id}`, { label: 'Fast', enabled: false });
-    expect(relabeled.json).toMatchObject({ label: 'Fast', enabled: false, status: 'ok', lastLatencyMs: 42 });
+    expect(relabeled.json).toMatchObject({ label: 'Fast', enabled: false, status: 'ok', lastLatencyMs: 42, lastExitIp: '198.51.100.4' });
     const moved = await t.api('PATCH', `/api/proxies/${proxy.id}`, { url: '6.6.6.6:8080' });
-    expect(moved.json).toMatchObject({ url: 'http://6.6.6.6:8080', status: 'unknown', lastLatencyMs: null, lastCheckedAt: null });
+    expect(moved.json).toMatchObject({
+      url: 'http://6.6.6.6:8080',
+      status: 'unknown',
+      lastLatencyMs: null,
+      lastExitIp: null,
+      lastCheckedAt: null,
+    });
 
     const provider = await createProvider();
     const key = (await t.api('POST', `/api/providers/${provider.id}/keys`, { key: 'proxied-key-000001', proxyId: proxy.id })).json;

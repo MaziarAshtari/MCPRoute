@@ -70,6 +70,7 @@ export const proxies = sqliteTable('proxies', {
   status: text('status', { enum: PROXY_STATUSES }).notNull().default('unknown'),
   lastCheckedAt: timestamp('last_checked_at'),
   lastLatencyMs: integer('last_latency_ms'),
+  lastExitIp: text('last_exit_ip'),
   lastError: text('last_error'),
   createdAt: createdAt(),
   updatedAt: updatedAt(),

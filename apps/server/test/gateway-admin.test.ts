@@ -135,9 +135,14 @@ describe('proxy health checks', () => {
 
       const listed = (await t.api('GET', '/api/proxies')).json;
       expect(listed.map((row: Record<string, unknown>) => row.status)).toEqual(['ok', 'ok', 'failed']);
+      expect(listed.map((row: Record<string, unknown>) => row.lastExitIp)).toEqual(['203.0.113.7', '203.0.113.7', null]);
       expect(listed[2]).toMatchObject({ lastError: expect.any(String), lastCheckedAt: expect.any(String) });
       expect(listed[0].lastLatencyMs).toEqual(expect.any(Number));
       expect((await t.api('POST', `/api/proxies/${UNKNOWN_ID}/check`)).statusCode).toBe(404);
+
+      // A different URL is a different proxy: the stored exit IP no longer applies.
+      const moved = await t.api('PATCH', `/api/proxies/${httpRow.id}`, { url: `http://127.0.0.1:${await closedPort()}` });
+      expect(moved.json).toMatchObject({ status: 'unknown', lastExitIp: null });
     } finally {
       await http.close();
       await socks.close();
@@ -188,6 +193,41 @@ describe('GET /api/stats/overview', () => {
       requests24h: { total: 3, ok: 2, error: 1, errorRate: 0.3333 },
     });
     expect(db.select().from(endpoints).all()).toHaveLength(1);
+  });
+});
+
+describe('GET /api/stats/timeseries', () => {
+  it('returns hour-aligned request and error counts, oldest first, with empty hours as zeros', async () => {
+    const HOUR = 3_600_000;
+    const currentHour = Math.floor(Date.now() / HOUR) * HOUR;
+    const at = (hoursAgo: number, offsetMs = 1) => new Date(currentHour - hoursAgo * HOUR + offsetMs);
+    t.database.db
+      .insert(requestLogs)
+      .values([
+        { method: 'tools/call', status: 'ok' as const, createdAt: at(0) },
+        { method: 'tools/call', status: 'error' as const, createdAt: at(0, 2) },
+        { method: 'tools/call', status: 'ok' as const, createdAt: at(2) },
+        { method: 'tools/call', status: 'ok' as const, createdAt: at(2, HOUR - 1) },
+        { method: 'tools/call', status: 'error' as const, createdAt: at(23) },
+        // Before the first bucket of a 24-hour window.
+        { method: 'tools/call', status: 'error' as const, createdAt: at(24) },
+      ])
+      .run();
+
+    const res = await t.api('GET', '/api/stats/timeseries');
+    expect(res.statusCode).toBe(200);
+    expect(res.json.bucketMinutes).toBe(60);
+    const buckets = res.json.buckets as { start: string; total: number; ok: number; error: number }[];
+    expect(buckets).toHaveLength(24);
+    expect(buckets[0]).toEqual({ start: at(23, 0).toISOString(), total: 1, ok: 0, error: 1 });
+    expect(buckets[21]).toEqual({ start: at(2, 0).toISOString(), total: 2, ok: 2, error: 0 });
+    expect(buckets[23]).toEqual({ start: new Date(currentHour).toISOString(), total: 2, ok: 1, error: 1 });
+    expect(buckets.reduce((sum, bucket) => sum + bucket.total, 0)).toBe(5);
+
+    const short = (await t.api('GET', '/api/stats/timeseries?hours=3')).json;
+    expect(short.buckets.map((bucket: { total: number }) => bucket.total)).toEqual([2, 0, 2]);
+    expect((await t.api('GET', '/api/stats/timeseries?hours=0')).statusCode).toBe(400);
+    expect((await t.api('GET', '/api/stats/timeseries?hours=169')).statusCode).toBe(400);
   });
 });
 
