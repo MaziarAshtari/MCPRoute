@@ -7,9 +7,10 @@ A self-hosted gateway for [Model Context Protocol](https://modelcontextprotocol.
 - **Endpoints** are MCP servers that MCPRoute exposes at `/mcp/{slug}`. Each one aggregates one or more providers.
 - Keys rotate **per MCP session** (session affinity), not per tool call.
 
-> **Status: step 1 of several.** This step adds the data model, the admin REST API, bulk import and the
-> project scaffolding. The MCP proxy and rotation engine, the `/mcp/{slug}` routes, proxy health checks, tool
-> fetching and the real admin UI come in later steps. The web app is a placeholder page for now.
+> **Status: step 2 of several.** Step 1 added the data model, the admin REST API and bulk import. Step 2 adds
+> the MCP gateway engine: `/mcp/{slug}` endpoints, per-session key affinity, per-key proxies, failover, request
+> logging, tool caching, proxy health checks and stats. The real admin UI comes in a later step; the web app is a
+> placeholder page for now.
 
 ## Tech stack
 
@@ -18,6 +19,7 @@ A self-hosted gateway for [Model Context Protocol](https://modelcontextprotocol.
 | Runtime | Node.js 20.19+ (Docker image: Node 24 LTS), TypeScript (strict) |
 | Monorepo | pnpm workspaces: `apps/server`, `apps/web`, `packages/shared` |
 | Backend | Fastify 5, pino logging, zod validation |
+| MCP | Official TypeScript SDK (`@modelcontextprotocol/sdk` 1.32), undici + fetch-socks for per-key proxies |
 | Database | SQLite via better-sqlite3 + Drizzle ORM (SQL migrations in `apps/server/drizzle`) |
 | Frontend | React 19, Vite 8, Tailwind CSS 4, shadcn/ui |
 | Tests | Vitest |
@@ -31,17 +33,21 @@ A self-hosted gateway for [Model Context Protocol](https://modelcontextprotocol.
 │   │   ├── drizzle/            Generated SQL migrations
 │   │   ├── src/
 │   │   │   ├── db/             Drizzle schema, client, migration CLI
-│   │   │   ├── lib/            Crypto (AES-256-GCM, hashing, masking), HTTP errors
-│   │   │   ├── routes/         auth, providers, keys, proxies, endpoints, logs, sessions
-│   │   │   ├── services/       Bulk import, proxy assignment, DTO mapping, lookups
+│   │   │   ├── gateway/        MCP gateway: /mcp routes, sessions, key selection, upstream clients,
+│   │   │   │                   proxies, failover, background jobs
+│   │   │   ├── lib/            Crypto (AES-256-GCM, hashing, masking), secret redaction, HTTP errors
+│   │   │   ├── routes/         auth, providers, keys, proxies, endpoints, logs, sessions, stats
+│   │   │   ├── services/       Bulk import, proxy assignment, key bookkeeping, DTO mapping, lookups
 │   │   │   ├── app.ts          Fastify app factory
 │   │   │   ├── auth.ts         Admin session cookie + /api guard
 │   │   │   ├── config.ts       Environment loading and validation
 │   │   │   └── index.ts        Entry point (migrates, then listens)
-│   │   └── test/               API integration tests
+│   │   └── test/               API and gateway integration tests (mock upstream MCP server, test proxies)
 │   └── web/                    React + Vite + Tailwind + shadcn/ui (placeholder page)
 ├── packages/
 │   └── shared/                 zod schemas, DTO types, constants, bulk-import parsers
+├── scripts/
+│   └── smoke-test.ts           Connects to an endpoint with the MCP SDK client, lists and calls tools
 ├── Dockerfile
 ├── docker-compose.yml
 └── .env.example
@@ -82,9 +88,11 @@ docker compose up -d --build
 
 Open http://localhost:3000 (or the `PORT` from `.env`). The single container serves the API and the built web UI.
 SQLite lives in the `mcproute-data` volume (`/data/mcproute.db`), and migrations run automatically on start.
-Compose only passes `MASTER_KEY`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `SESSION_TTL_MINUTES`, `LOG_LEVEL`,
+Compose only passes `MASTER_KEY`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `SESSION_TTL_MINUTES`,
+`UPSTREAM_CONNECT_TIMEOUT_MS`, `UPSTREAM_CALL_TIMEOUT_MS`, `LOG_RETENTION_DAYS`, `PROXY_CHECK_URL`, `LOG_LEVEL`,
 `TRUST_PROXY` and `COOKIE_SECURE` into the container. `HOST`, the container port and `DATABASE_PATH` are fixed
-by the image.
+by the image. stdio providers run inside the container, so their command must exist there (`node`/`npx` do;
+`uvx`, `python` or `docker` do not).
 
 ## Configuration
 
@@ -96,9 +104,13 @@ by the image.
 | `PORT` | `3000` | HTTP port. |
 | `DATABASE_PATH` | `./data/mcproute.db` | SQLite file. Relative paths resolve against the `.env` directory, or the working directory when there is no `.env`. |
 | `SESSION_TTL_MINUTES` | `60` | Idle lifetime of MCP sessions and their key bindings. |
+| `UPSTREAM_CONNECT_TIMEOUT_MS` | `15000` | Timeout for connecting to an upstream MCP server (proxy/TCP connect and `initialize`) and for proxy health checks. |
+| `UPSTREAM_CALL_TIMEOUT_MS` | `120000` | Timeout for one forwarded upstream request (`tools/call`, `tools/list`, ...). |
+| `LOG_RETENTION_DAYS` | `30` | Request logs older than this are deleted (checked hourly). |
+| `PROXY_CHECK_URL` | `https://api.ipify.org?format=json` | Fetched through a proxy by the health check; must return `{"ip": "..."}` or a bare IP. |
 | `HOST` | `127.0.0.1` | Bind address (`0.0.0.0` in Docker). |
 | `LOG_LEVEL` | `info` | pino log level. |
-| `TRUST_PROXY` | `false` | Trust `X-Forwarded-*` headers (set when behind a reverse proxy). |
+| `TRUST_PROXY` | `true` | Trust `X-Forwarded-*` headers. MCPRoute is meant to run behind a reverse proxy; set `false` when it is exposed directly. |
 | `COOKIE_SECURE` | `auto` | Secure flag of the session cookie: `auto`, `true` or `false`. |
 | `WEB_DIST_DIR` | `apps/web/dist` | Directory of the built web UI. |
 
@@ -112,6 +124,7 @@ Changing `ADMIN_USERNAME`, `ADMIN_PASSWORD` or `MASTER_KEY` signs out existing a
 | `pnpm dev` | API server (tsx watch) and Vite dev server in parallel |
 | `pnpm build` | Build the web UI (`apps/web/dist`) and bundle the server (`apps/server/dist`) |
 | `pnpm start` | Start the built server |
+| `pnpm smoke-test <url> <token> [tool] [json-args]` | Connect to an endpoint with the MCP SDK client, list tools, optionally call one (`--sse`, `--query-token`) |
 | `pnpm db:migrate` | Apply database migrations |
 | `pnpm db:generate` | Generate a new SQL migration after changing `apps/server/src/db/schema.ts` |
 | `pnpm test` | Run all Vitest suites |
@@ -141,10 +154,18 @@ validated with the zod schemas in `packages/shared`. Errors look like
 | `GET` / `PATCH` / `DELETE` | `/api/endpoints/:id` | Read / update / delete endpoint |
 | `POST` | `/api/endpoints/:id/regenerate-token` | New access token (returned once) |
 | `PUT` | `/api/endpoints/:id/providers` | Replace linked providers and their tool filters |
+| `POST` | `/api/providers/:id/refresh-tools` | Fetch `tools/list` with one available key and store it as the tool cache → `{ tools, toolsFetchedAt }` (409 without a usable key, 502 on upstream errors) |
+| `POST` | `/api/keys/:id/test` | Connect upstream with this key and its proxy, run `tools/list` → `{ ok, latencyMs, toolCount, error }` |
+| `POST` | `/api/proxies/:id/check` | Fetch `PROXY_CHECK_URL` through the proxy, store the health → `{ proxyId, ok, status, exitIp, latencyMs, error, checkedAt }` |
+| `POST` | `/api/proxies/check-all` | Check every proxy (10 at a time) → `{ total, ok, failed, results[] }` |
 | `GET` | `/api/logs` | Request logs: `page`, `pageSize`, `endpointId`, `providerId`, `apiKeyId`, `status`, `from`, `to` |
 | `GET` | `/api/sessions` | Active MCP sessions with their bound keys (`page`, `pageSize`, `endpointId`) |
-| `DELETE` | `/api/sessions/:id` | End a session and release its key bindings |
+| `DELETE` | `/api/sessions/:id` | End a session: release its key bindings and close its live connections |
+| `GET` | `/api/stats/overview` | Providers, keys by status, proxies by status, active sessions, requests and error rate (last 24 h) |
 | `GET` | `/healthz` | Public health check |
+
+Proxy checks only update the proxy's status; they never disable proxies or keys. The key test and tool refresh
+use the stored key without changing its counters or cooldown.
 
 ### Example
 
@@ -226,6 +247,161 @@ disabled proxies are never assigned.
 - `one_to_one`: each proxy serves at most one of the provider's keys. Keys left over when proxies run out
   stay unassigned and are reported as `unassigned`.
 
+## MCP endpoints
+
+Every enabled endpoint is a full MCP server at `/mcp/{slug}` that aggregates its linked, enabled providers.
+
+| Method | Path | Transport |
+| --- | --- | --- |
+| `POST` / `GET` / `DELETE` | `/mcp/{slug}` | Streamable HTTP (current spec). `Mcp-Session-Id` is issued on `initialize`. |
+| `GET` | `/mcp/{slug}/sse` | Legacy HTTP+SSE stream, only when the endpoint has `enableSse: true` |
+| `POST` | `/mcp/{slug}/messages?sessionId=…` | Legacy HTTP+SSE messages, only when `enableSse: true` |
+
+**Authentication.** Send the endpoint's access token as `Authorization: Bearer <token>`, or as `?token=<token>`
+for clients that cannot set headers. Tokens are compared by SHA-256 hash in constant time. Unknown or disabled
+endpoints answer `404`, a missing or wrong token `401`. With `?token=` on the legacy SSE stream, the message URL
+announced to the client carries the token too. Query tokens are redacted from request logs.
+
+### Sessions and key affinity
+
+- MCPRoute generates the session id, stores it in `sessions` and keeps it alive while requests arrive. Sessions
+  idle for `SESSION_TTL_MINUTES` are expired by a background job, which also closes their upstream connections
+  and releases their keys. `DELETE /mcp/{slug}` (client) and `DELETE /api/sessions/:id` (admin) end a session
+  immediately.
+- The first request in a session that needs a provider binds **one key** for that provider, chosen by the
+  provider's `rotationStrategy`. All later calls for that provider in the session use the same key and the same
+  upstream client. Bindings live in `session_bindings`.
+  - `round_robin`: smooth weighted round robin (a key with `weight: 3` is picked three times as often).
+  - `random`: weighted random.
+  - `least_used`: fewest bound sessions per unit of weight, then fewest calls.
+- Keys that are disabled, in cooldown, or assigned to a disabled proxy are skipped (traffic never falls back to a
+  direct connection). Cooldowns end automatically once `cooldownUntil` has passed.
+- Upstream clients are opened lazily per (session, provider) and cached in memory; upstream sessions are separate
+  and internal. After a restart, clients keep their session id: the session is rebuilt from the database with the
+  same key bindings and reconnects upstream on its next call. Legacy SSE sessions end with their stream.
+- If no key is available, the call returns an MCP tool error (`isError: true`) that says so.
+
+### Upstream connections and proxies
+
+The key is placed according to the provider's `authMode` (header template, query parameter, `{{API_KEY}}` in the
+URL, or `{{API_KEY}}` in stdio env values and args). For `streamable_http` and `sse` providers each connection
+uses an undici dispatcher for the key's proxy: an HTTP CONNECT tunnel for `http`/`https` proxies and
+[fetch-socks](https://github.com/Kaciras/fetch-socks) for `socks5`/`socks5h` (with authentication; the proxy
+resolves hostnames in both cases). Keys without a proxy connect directly.
+
+stdio providers are spawned with a minimal environment (`PATH`, `HOME`, …) plus the provider's `env`. When the
+key has a proxy, `HTTP_PROXY`, `HTTPS_PROXY` and `ALL_PROXY` (and lowercase variants) are set, plus
+`NODE_USE_ENV_PROXY=1` for http(s) proxies. **This is best effort:** only programs that honour these variables
+are proxied, and many ignore them (Node.js before v24 ignores them entirely, and few programs support SOCKS this
+way).
+
+### Tools, prompts and resources
+
+- `tools/list` merges the tools of all linked providers. Each link's `toolFilterMode` applies (`allowlist` /
+  `denylist` with `toolNames`, by upstream name or prefixed name). With `toolPrefixMode: "provider_slug"` tools
+  are exposed as `{providerSlug}__{toolName}` and the prefix is stripped when routing. Without prefixes, the first
+  provider (by name) wins when two expose the same tool name.
+- `tools/list` uses the provider's `cachedTools` without connecting upstream. A cache older than 24 hours is
+  refreshed in the background; a provider without a cache is listed through the session's key and cached.
+- `prompts/*` and `resources/*` (`resources/list`, `resources/templates/list`, `resources/read`) are forwarded to
+  providers that announce the capability. Prompt names get the same prefix; resources keep their URIs (they are
+  opaque identifiers) and only their names are prefixed. Resource subscriptions, completions and upstream
+  notifications (`list_changed`, progress, logging) are not forwarded.
+
+### Failover and cooldown
+
+A call fails because of its key when the upstream transport returns one of the provider's
+`failureRules.httpStatuses`, or when the error message (or the text of an `isError` tool result) matches one of
+`failureRules.messagePatterns`. Then MCPRoute increments the key's `errorCount`, stores `lastError`, puts the key
+into cooldown for `cooldownSeconds` and, if `failoverEnabled`, binds the session to another key, reconnects and
+retries the same call once per alternative key (at most 3 attempts in total). Other errors — invalid arguments,
+ordinary tool errors — are returned as they are, without failover. JSON-RPC errors from the upstream keep their
+code and message.
+
+> **Note:** failover moves the session to a different key, and therefore to a new upstream session. Upstream
+> state tied to the old key (async task or job IDs, server-side caches, conversation state) is lost.
+
+### Logging and stats
+
+Each `tools/call` attempt (also `prompts/get` and `resources/read`) writes one `request_logs` row with endpoint,
+session, provider, key, proxy, tool, status, latency and error; failover attempts get their own rows. Keys track
+`usageCount`, `lastUsedAt` and `activeSessions` (sessions currently bound). Logs older than
+`LOG_RETENTION_DAYS` are deleted hourly. The upstream API key (verbatim or URL-encoded) and proxy passwords are
+masked in error messages and in upstream results before they reach the logs, the admin API or MCP clients.
+
+## Connecting MCP clients
+
+Create an endpoint, link providers, and copy the access token (it is shown once; regenerate it with
+`POST /api/endpoints/:id/regenerate-token`). The endpoint URL is `https://<your-host>/mcp/<slug>`.
+
+**Cursor** (`~/.cursor/mcp.json` or `.cursor/mcp.json`):
+
+```json
+{
+  "mcpServers": {
+    "mcproute": {
+      "url": "https://mcp.example.com/mcp/research",
+      "headers": { "Authorization": "Bearer ${env:MCPROUTE_TOKEN}" }
+    }
+  }
+}
+```
+
+**Claude Desktop** (`claude_desktop_config.json`). Its custom connectors have no field for a bearer token, so use
+the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge (needs Node.js):
+
+```json
+{
+  "mcpServers": {
+    "mcproute": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://mcp.example.com/mcp/research", "--header", "Authorization:${MCPROUTE_AUTH}"],
+      "env": { "MCPROUTE_AUTH": "Bearer mcpr_your_token" }
+    }
+  }
+}
+```
+
+**Claude Code:**
+
+```bash
+claude mcp add --transport http mcproute https://mcp.example.com/mcp/research \
+  --header "Authorization: Bearer mcpr_your_token"
+```
+
+Clients that cannot send headers can use `https://mcp.example.com/mcp/research?token=mcpr_your_token`. Clients that
+only speak the legacy SSE transport use `https://mcp.example.com/mcp/research/sse` (enable `enableSse` on the
+endpoint first).
+
+**Smoke test** from a checkout:
+
+```bash
+pnpm smoke-test https://mcp.example.com/mcp/research mcpr_your_token                     # list tools
+pnpm smoke-test https://mcp.example.com/mcp/research mcpr_your_token web_search_exa '{"query":"MCP"}'
+pnpm smoke-test https://mcp.example.com/mcp/research mcpr_your_token --sse --query-token
+```
+
+`MCPROUTE_URL` and `MCPROUTE_TOKEN` can replace the first two arguments. The exit code is non-zero when
+connecting fails or the tool returns an error.
+
+## Running behind a reverse proxy (Caddy)
+
+MCPRoute trusts `X-Forwarded-*` by default (`TRUST_PROXY=true`). MCP responses are streamed (SSE): MCPRoute sends
+`Cache-Control: no-cache, no-transform` and `X-Accel-Buffering: no`, flushes every event immediately, and writes a
+keep-alive comment every 25 seconds on idle streams so proxies do not cut them. A minimal Caddyfile:
+
+```caddyfile
+mcp.example.com {
+	reverse_proxy mcproute:3000 {
+		# Stream responses immediately (Caddy also does this for text/event-stream by default).
+		flush_interval -1
+	}
+}
+```
+
+Do not enable response compression (`encode`) for `/mcp/*`. With Compose, put Caddy on the same network and drop
+the `ports` mapping if MCPRoute should only be reachable through Caddy.
+
 ## Security notes
 
 - **API keys** are encrypted with AES-256-GCM using subkeys derived from `MASTER_KEY` (HKDF-SHA256). Duplicates
@@ -236,11 +412,21 @@ disabled proxies are never assigned.
 - **Admin sessions** use a signed, `httpOnly`, `SameSite=Strict` cookie that lasts 24 hours. Credentials are
   compared in constant time.
 - **Logs** never contain plaintext keys, proxy passwords, tokens or credentials. pino also redacts
-  sensitive paths as a safety net.
+  sensitive paths as a safety net, and `?token=` is stripped from logged URLs.
+- **Upstream keys stay private.** MCP clients only ever see the endpoint token. Keys are decrypted just before
+  connecting upstream, and are masked in upstream errors and results forwarded to clients.
+- **stdio providers** do not inherit the server's environment (so `MASTER_KEY` and `ADMIN_PASSWORD` are not
+  visible to them), only a minimal set of variables plus the provider's `env`.
 
 ## Testing
 
 ```bash
-pnpm test        # shared parser tests, encryption tests and API integration tests
+pnpm test        # shared parser tests, unit tests, API and gateway integration tests
 pnpm typecheck
 ```
+
+The gateway tests start an in-process upstream MCP server (Streamable HTTP and legacy SSE, built with the SDK), a
+stdio MCP server, and local HTTP CONNECT and SOCKS5 proxies. They cover session affinity, rotation, restoring
+sessions after a restart, idle expiry, tool prefixing and filters, the tool cache, prompts and resources, failover
+on HTTP 429 and on quota errors in tool results, per-key proxies, token authentication (header and query), the
+legacy SSE transport, keep-alive pings, and the new admin routes.

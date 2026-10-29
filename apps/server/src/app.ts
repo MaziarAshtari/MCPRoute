@@ -12,6 +12,8 @@ import { cookieSigningSecret, registerAdminAuth } from './auth';
 import type { AppConfig } from './config';
 import type { AppContext } from './context';
 import type { DatabaseHandle } from './db/client';
+import { Gateway, type GatewayOptions } from './gateway/gateway';
+import { mcpRoutes } from './gateway/routes';
 import { SecretBox } from './lib/crypto';
 import { HttpError, errorBody } from './lib/errors';
 import { createLogger } from './logger';
@@ -22,12 +24,22 @@ import { logRoutes } from './routes/logs';
 import { providerRoutes } from './routes/providers';
 import { proxyRoutes } from './routes/proxies';
 import { sessionRoutes } from './routes/sessions';
+import { statsRoutes } from './routes/stats';
 import { registerWebUi } from './web';
+
+declare module 'fastify' {
+  interface FastifyInstance {
+    /** The MCP gateway engine (sessions, upstream connections, background jobs). */
+    gateway: Gateway;
+  }
+}
 
 export interface BuildAppOptions {
   config: AppConfig;
   database: DatabaseHandle;
   logger?: FastifyBaseLogger;
+  /** Overrides for gateway timings (tests). */
+  gateway?: Partial<GatewayOptions>;
 }
 
 function handleError(error: FastifyError, request: FastifyRequest, reply: FastifyReply) {
@@ -49,14 +61,28 @@ function handleError(error: FastifyError, request: FastifyRequest, reply: Fastif
   return reply.code(500).send(errorBody(500, 'Internal Server Error'));
 }
 
-export async function buildApp({ config, database, logger }: BuildAppOptions): Promise<FastifyInstance> {
+export async function buildApp({
+  config,
+  database,
+  logger,
+  gateway: gatewayOptions,
+}: BuildAppOptions): Promise<FastifyInstance> {
   const app = Fastify({
     loggerInstance: logger ?? createLogger({ level: config.logLevel, pretty: config.nodeEnv === 'development' }),
     trustProxy: config.trustProxy,
+    // MCP streams are ended in preClose; MCP clients may still hold sockets Node does not treat as idle
+    // (e.g. a reconnect opened without a request), which would otherwise delay shutdown.
+    forceCloseConnections: true,
   });
-  const ctx: AppContext = { config, db: database.db, secrets: new SecretBox(config.masterKey) };
+  const secrets = new SecretBox(config.masterKey);
+  const gateway = new Gateway({ config, db: database.db, secrets, logger: app.log }, gatewayOptions);
+  const ctx: AppContext = { config, db: database.db, secrets, gateway };
+  app.decorate('gateway', gateway);
 
   app.setErrorHandler(handleError);
+  app.addHook('onReady', async () => gateway.start());
+  // preClose, not onClose: open SSE streams would otherwise keep the server from closing.
+  app.addHook('preClose', async () => gateway.close());
   await app.register(fastifyCookie, { secret: cookieSigningSecret(config) });
   registerAdminAuth(app, config);
 
@@ -67,12 +93,22 @@ export async function buildApp({ config, database, logger }: BuildAppOptions): P
 
   await app.register(
     async (api) => {
-      for (const routes of [authRoutes, providerRoutes, keyRoutes, proxyRoutes, endpointRoutes, logRoutes, sessionRoutes]) {
+      for (const routes of [
+        authRoutes,
+        providerRoutes,
+        keyRoutes,
+        proxyRoutes,
+        endpointRoutes,
+        logRoutes,
+        sessionRoutes,
+        statsRoutes,
+      ]) {
         await api.register(routes(ctx));
       }
     },
     { prefix: '/api' },
   );
+  await app.register(mcpRoutes(gateway));
 
   await registerWebUi(app, config.webDistDir);
   return app;

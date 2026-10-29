@@ -1,7 +1,11 @@
 export const APP_NAME = 'MCPRoute';
+export const APP_VERSION = '0.2.0';
 
 /** Placeholder replaced with the bound API key in provider URLs, headers, args and env values. */
 export const API_KEY_PLACEHOLDER = '{{API_KEY}}';
+
+/** Separates the provider slug from the upstream name when an endpoint uses `toolPrefixMode: "provider_slug"`. */
+export const TOOL_PREFIX_SEPARATOR = '__';
 
 export const TRANSPORTS = ['streamable_http', 'sse', 'stdio'] as const;
 export type Transport = (typeof TRANSPORTS)[number];

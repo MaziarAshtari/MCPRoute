@@ -5,13 +5,13 @@ import {
   type SessionBindingDto,
   type SessionDto,
 } from '@mcproute/shared';
-import { and, asc, count, desc, eq, gt, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, inArray, type SQL } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AppContext } from '../context';
 import { apiKeys, endpoints, providers, sessionBindings, sessions } from '../db/schema';
 import { notFound } from '../lib/errors';
 
-export function sessionRoutes({ db }: AppContext): FastifyPluginAsync {
+export function sessionRoutes({ db, gateway }: AppContext): FastifyPluginAsync {
   return async (app) => {
     /** Sessions that have not expired yet, newest activity first, with their bound keys. */
     app.get('/sessions', async (request): Promise<Paginated<SessionDto>> => {
@@ -79,23 +79,13 @@ export function sessionRoutes({ db }: AppContext): FastifyPluginAsync {
       };
     });
 
-    /** Ends a session: its key bindings are dropped and the keys' active-session counters released. */
+    /**
+     * Ends a session: its key bindings are dropped, the keys' active-session counters released and, when the
+     * session is live, its downstream stream and upstream connections closed.
+     */
     app.delete('/sessions/:id', async (request, reply) => {
       const { id } = sessionIdParamsSchema.parse(request.params);
-      db.transaction((tx) => {
-        const bound = tx
-          .select({ apiKeyId: sessionBindings.apiKeyId })
-          .from(sessionBindings)
-          .where(eq(sessionBindings.sessionId, id))
-          .all();
-        if (tx.delete(sessions).where(eq(sessions.id, id)).run().changes === 0) throw notFound('Session');
-        for (const { apiKeyId } of bound) {
-          tx.update(apiKeys)
-            .set({ activeSessions: sql`max(${apiKeys.activeSessions} - 1, 0)` })
-            .where(eq(apiKeys.id, apiKeyId))
-            .run();
-        }
-      });
+      if (!gateway.endSession(id, 'deleted by admin')) throw notFound('Session');
       request.log.info({ sessionId: id }, 'Session deleted');
       return reply.code(204).send();
     });
