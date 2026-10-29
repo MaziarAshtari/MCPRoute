@@ -5,12 +5,14 @@ import {
   bulkKeysImportSchema,
   idParamsSchema,
   type ApiKeyDto,
+  type KeyTestResultDto,
 } from '@mcproute/shared';
 import { eq, type SQL } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AppContext } from '../context';
 import type { DbExecutor } from '../db/client';
 import { apiKeys, proxies } from '../db/schema';
+import { findKeyWithProxy } from '../gateway/keys';
 import { notFound } from '../lib/errors';
 import { toApiKeyDto } from '../services/dto';
 import { assertKeyIsNew, assignProxies, importKeys, keyOrder, keySecretFields } from '../services/keys';
@@ -34,7 +36,7 @@ function getKeyDto(db: DbExecutor, id: string): ApiKeyDto {
   return toApiKeyDto(row.key, row.proxy);
 }
 
-export function keyRoutes({ db, secrets }: AppContext): FastifyPluginAsync {
+export function keyRoutes({ db, secrets, gateway }: AppContext): FastifyPluginAsync {
   return async (app) => {
     app.get('/providers/:id/keys', async (request) => {
       const { id } = idParamsSchema.parse(request.params);
@@ -129,6 +131,16 @@ export function keyRoutes({ db, secrets }: AppContext): FastifyPluginAsync {
 
       if (Object.keys(changes).length > 0) db.update(apiKeys).set(changes).where(eq(apiKeys.id, id)).run();
       return getKeyDto(db, id);
+    });
+
+    /** Connects upstream with this key (through its proxy, even when disabled) and runs tools/list. */
+    app.post('/keys/:id/test', async (request): Promise<KeyTestResultDto> => {
+      const { id } = idParamsSchema.parse(request.params);
+      const row = findKeyWithProxy(db, id);
+      if (!row) throw notFound('API key');
+      const result = await gateway.testKey(findProvider(db, row.key.providerId), row);
+      request.log.info({ apiKeyId: id, ok: result.ok, latencyMs: result.latencyMs }, 'API key tested');
+      return result;
     });
 
     app.delete('/keys/:id', async (request, reply) => {

@@ -12,9 +12,14 @@
     "dev": "pnpm -r --parallel run dev",
     "build": "pnpm -r run build",
     "start": "pnpm --filter @mcproute/server run start",
+    "smoke-test": "tsx scripts/smoke-test.ts",
     "db:generate": "pnpm --filter @mcproute/server run db:generate",
     "db:migrate": "pnpm --filter @mcproute/server run db:migrate",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "tsx": "^4.23.15"
   }
 }

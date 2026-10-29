@@ -1,8 +1,17 @@
-import { bulkProxiesImportSchema, idParamsSchema, proxyCreateSchema, proxyUpdateSchema } from '@mcproute/shared';
+import {
+  bulkProxiesImportSchema,
+  idParamsSchema,
+  proxyCreateSchema,
+  proxyUpdateSchema,
+  type ProxyCheckAllResultDto,
+  type ProxyCheckResultDto,
+} from '@mcproute/shared';
 import { asc, eq, sql } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AppContext } from '../context';
-import { proxies } from '../db/schema';
+import { proxies, type ProxyRow } from '../db/schema';
+import { checkProxy } from '../gateway/proxy';
+import { mapConcurrent } from '../lib/concurrency';
 import { notFound } from '../lib/errors';
 import { toProxyDto } from '../services/dto';
 import {
@@ -13,7 +22,29 @@ import {
 } from '../services/proxies';
 import { BULK_BODY_LIMIT } from './keys';
 
-export function proxyRoutes({ db }: AppContext): FastifyPluginAsync {
+const CHECK_CONCURRENCY = 10;
+
+export function proxyRoutes({ db, config }: AppContext): FastifyPluginAsync {
+  /** Requests PROXY_CHECK_URL through the proxy and stores the outcome as the proxy's health status. */
+  async function check(proxy: ProxyRow): Promise<ProxyCheckResultDto> {
+    const outcome = await checkProxy(proxy.url, config.proxyCheckUrl, config.upstreamConnectTimeoutMs);
+    const checkedAt = new Date();
+    const status = outcome.ok ? 'ok' : 'failed';
+    db.update(proxies)
+      .set({ status, lastCheckedAt: checkedAt, lastLatencyMs: outcome.latencyMs, lastError: outcome.error })
+      .where(eq(proxies.id, proxy.id))
+      .run();
+    return {
+      proxyId: proxy.id,
+      ok: outcome.ok,
+      status,
+      exitIp: outcome.exitIp,
+      latencyMs: outcome.latencyMs,
+      error: outcome.error,
+      checkedAt: checkedAt.toISOString(),
+    };
+  }
+
   return async (app) => {
     app.get('/proxies', async () => {
       const counts = proxyKeyCounts(db);
@@ -45,6 +76,19 @@ export function proxyRoutes({ db }: AppContext): FastifyPluginAsync {
         'Bulk proxy import finished',
       );
       return result;
+    });
+
+    app.post('/proxies/check-all', async (request): Promise<ProxyCheckAllResultDto> => {
+      const rows = db.select().from(proxies).orderBy(asc(proxies.createdAt), asc(sql`${proxies}.rowid`)).all();
+      const results = await mapConcurrent(rows, CHECK_CONCURRENCY, check);
+      const ok = results.filter((result) => result.ok).length;
+      request.log.info({ total: results.length, ok, failed: results.length - ok }, 'Proxy health check finished');
+      return { total: results.length, ok, failed: results.length - ok, results };
+    });
+
+    app.post('/proxies/:id/check', async (request): Promise<ProxyCheckResultDto> => {
+      const { id } = idParamsSchema.parse(request.params);
+      return check(findProxy(db, id));
     });
 
     app.get('/proxies/:id', async (request) => {

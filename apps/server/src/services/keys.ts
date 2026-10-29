@@ -5,7 +5,7 @@ import {
   type DefaultProxyScheme,
   type ProxyAssignMode,
 } from '@mcproute/shared';
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, ne, or, sql } from 'drizzle-orm';
 import type { AppDatabase, DbExecutor } from '../db/client';
 import { apiKeys, proxies } from '../db/schema';
 import { maskSecret, type SecretBox } from '../lib/crypto';
@@ -209,4 +209,51 @@ export function assignProxies(
     });
     return { assigned, unassigned: targets.length - assigned };
   });
+}
+
+// Correlated count; raw names keep the reference to the outer api_keys row unambiguous.
+const boundSessionCount = sql<number>`(select count(*) from session_bindings where session_bindings.api_key_id = api_keys.id)`;
+
+/**
+ * Recomputes `activeSessions` (number of sessions bound to the key) from session_bindings, for the given
+ * keys or all of them. Recounting rather than incrementing keeps the counter right after cascading deletes.
+ */
+export function syncActiveSessions(db: DbExecutor, keyIds?: readonly string[]): void {
+  if (keyIds && keyIds.length === 0) return;
+  const changed = sql`${apiKeys.activeSessions} != ${boundSessionCount}`;
+  db.update(apiKeys)
+    .set({ activeSessions: boundSessionCount })
+    .where(keyIds ? and(inArray(apiKeys.id, [...new Set(keyIds)]), changed) : changed)
+    .run();
+}
+
+/** Puts keys whose cooldown has passed back into rotation. */
+export function reactivateExpiredCooldowns(db: DbExecutor, now: Date, providerId?: string): number {
+  const expired = and(eq(apiKeys.status, 'cooldown'), or(isNull(apiKeys.cooldownUntil), lte(apiKeys.cooldownUntil, now)));
+  return db
+    .update(apiKeys)
+    .set({ status: 'active', cooldownUntil: null })
+    .where(providerId ? and(eq(apiKeys.providerId, providerId), expired) : expired)
+    .run().changes;
+}
+
+/** Counts a failure and starts the provider's cooldown (keys disabled by an admin stay disabled). */
+export function recordKeyFailure(db: DbExecutor, keyId: string, message: string, cooldownSeconds: number, now: Date): void {
+  db.update(apiKeys)
+    .set({ errorCount: sql`${apiKeys.errorCount} + 1`, lastError: message })
+    .where(eq(apiKeys.id, keyId))
+    .run();
+  if (cooldownSeconds > 0) {
+    db.update(apiKeys)
+      .set({ status: 'cooldown', cooldownUntil: new Date(now.getTime() + cooldownSeconds * 1000) })
+      .where(and(eq(apiKeys.id, keyId), ne(apiKeys.status, 'disabled')))
+      .run();
+  }
+}
+
+export function recordKeyUsage(db: DbExecutor, keyId: string, now: Date): void {
+  db.update(apiKeys)
+    .set({ usageCount: sql`${apiKeys.usageCount} + 1`, lastUsedAt: now })
+    .where(eq(apiKeys.id, keyId))
+    .run();
 }

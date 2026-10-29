@@ -1,9 +1,16 @@
-import { idParamsSchema, providerConfigSchema, providerCreateSchema, providerUpdateSchema } from '@mcproute/shared';
+import {
+  idParamsSchema,
+  providerConfigSchema,
+  providerCreateSchema,
+  providerUpdateSchema,
+  type RefreshToolsResultDto,
+} from '@mcproute/shared';
 import { asc, eq } from 'drizzle-orm';
 import type { FastifyPluginAsync } from 'fastify';
 import type { AppContext } from '../context';
 import { providers } from '../db/schema';
-import { notFound } from '../lib/errors';
+import { NoKeyAvailableError } from '../gateway/session';
+import { HttpError, conflict, notFound } from '../lib/errors';
 import { toProviderDto } from '../services/dto';
 import {
   assertProviderSlugAvailable,
@@ -12,7 +19,7 @@ import {
   providerToConfig,
 } from '../services/providers';
 
-export function providerRoutes({ db }: AppContext): FastifyPluginAsync {
+export function providerRoutes({ db, gateway }: AppContext): FastifyPluginAsync {
   return async (app) => {
     app.get('/providers', async () => {
       const stats = keyStatsByProvider(db);
@@ -47,6 +54,20 @@ export function providerRoutes({ db }: AppContext): FastifyPluginAsync {
       const row = db.update(providers).set(config).where(eq(providers.id, id)).returning().get();
       if (!row) throw notFound('Provider');
       return toProviderDto(row, keyStatsByProvider(db, id).get(id));
+    });
+
+    /** Fetches tools/list with one available key and stores it as the provider's tool cache. */
+    app.post('/providers/:id/refresh-tools', async (request): Promise<RefreshToolsResultDto> => {
+      const { id } = idParamsSchema.parse(request.params);
+      const provider = findProvider(db, id);
+      try {
+        const { tools, fetchedAt } = await gateway.refreshProviderTools(provider);
+        request.log.info({ providerId: id, toolCount: tools.length }, 'Provider tools refreshed');
+        return { tools, toolsFetchedAt: fetchedAt.toISOString() };
+      } catch (error) {
+        if (error instanceof NoKeyAvailableError) throw conflict(error.message);
+        throw new HttpError(502, `Upstream request failed: ${(error as Error).message}`);
+      }
     });
 
     app.delete('/providers/:id', async (request, reply) => {

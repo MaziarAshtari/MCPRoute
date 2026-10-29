@@ -1,7 +1,9 @@
+import type { AddressInfo } from 'node:net';
 import type { FastifyInstance, InjectOptions } from 'fastify';
 import { buildApp } from '../src/app';
 import { parseConfig, type AppConfig } from '../src/config';
 import { openDatabase, runMigrations, type DatabaseHandle } from '../src/db/client';
+import type { Gateway, GatewayOptions } from '../src/gateway/gateway';
 import { createLogger } from '../src/logger';
 
 export const ADMIN = { username: 'admin', password: 'correct-horse-battery-staple' };
@@ -15,6 +17,10 @@ export interface TestContext {
   logs: string[];
   /** Authenticated request helper. */
   api: (method: InjectOptions['method'], url: string, payload?: unknown) => Promise<ApiResponse>;
+  /** Starts listening on a random local port (needed for real MCP clients); returns the base URL. */
+  listen: () => Promise<string>;
+  /** The app's gateway engine. */
+  gateway: Gateway;
   close: () => Promise<void>;
 }
 
@@ -25,7 +31,10 @@ export interface ApiResponse {
   json: any;
 }
 
-export async function createTestContext(env: Record<string, string> = {}): Promise<TestContext> {
+export async function createTestContext(
+  env: Record<string, string> = {},
+  options: { gateway?: Partial<GatewayOptions>; database?: DatabaseHandle } = {},
+): Promise<TestContext> {
   const config = parseConfig(
     {
       NODE_ENV: 'test',
@@ -38,12 +47,12 @@ export async function createTestContext(env: Record<string, string> = {}): Promi
     },
     process.cwd(),
   );
-  const database = openDatabase(config.databasePath);
+  const database = options.database ?? openDatabase(config.databasePath);
   runMigrations(database.db);
 
   const logs: string[] = [];
   const logger = createLogger({ level: 'trace' }, { write: (line: string) => void logs.push(line) });
-  const app = await buildApp({ config, database, logger });
+  const app = await buildApp({ config, database, logger, gateway: options.gateway });
   await app.ready();
 
   const login = await app.inject({
@@ -74,9 +83,14 @@ export async function createTestContext(env: Record<string, string> = {}): Promi
     database,
     logs,
     api,
+    gateway: app.gateway,
+    listen: async () => {
+      await app.listen({ host: '127.0.0.1', port: 0 });
+      return `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+    },
     close: async () => {
       await app.close();
-      database.close();
+      if (!options.database) database.close();
     },
   };
 }

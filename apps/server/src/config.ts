@@ -19,6 +19,14 @@ export interface AppConfig {
   adminPassword: string;
   /** Idle lifetime of MCP sessions (session affinity). */
   sessionTtlMinutes: number;
+  /** Timeout for connecting to an upstream MCP server (TCP/proxy connect plus `initialize`). */
+  upstreamConnectTimeoutMs: number;
+  /** Timeout for a single forwarded upstream request (e.g. `tools/call`). */
+  upstreamCallTimeoutMs: number;
+  /** Request logs older than this are deleted by a background job. */
+  logRetentionDays: number;
+  /** URL fetched through a proxy by the proxy health check; must return `{ "ip": "..." }` or the bare IP. */
+  proxyCheckUrl: string;
   logLevel: LogLevel;
   trustProxy: boolean;
   cookieSecure: boolean | 'auto';
@@ -33,6 +41,7 @@ export class ConfigError extends Error {
 }
 
 export const DEFAULT_DATABASE_PATH = './data/mcproute.db';
+export const DEFAULT_PROXY_CHECK_URL = 'https://api.ipify.org?format=json';
 
 // Treat `KEY=` (empty) like an unset variable so defaults apply.
 const env = <T extends z.ZodType>(schema: T) => z.preprocess((value) => (value === '' ? undefined : value), schema);
@@ -49,8 +58,15 @@ const envSchema = z.object({
     z.string({ error: 'ADMIN_PASSWORD is required' }).min(8, 'ADMIN_PASSWORD must be at least 8 characters'),
   ),
   SESSION_TTL_MINUTES: env(z.coerce.number().int().min(1).max(43_200).default(60)),
+  UPSTREAM_CONNECT_TIMEOUT_MS: env(z.coerce.number().int().min(1_000).max(300_000).default(15_000)),
+  UPSTREAM_CALL_TIMEOUT_MS: env(z.coerce.number().int().min(1_000).max(3_600_000).default(120_000)),
+  LOG_RETENTION_DAYS: env(z.coerce.number().int().min(1).max(3_650).default(30)),
+  PROXY_CHECK_URL: env(
+    z.url({ protocol: /^https?$/, error: 'PROXY_CHECK_URL must be an http(s) URL' }).default(DEFAULT_PROXY_CHECK_URL),
+  ),
   LOG_LEVEL: env(z.enum(LOG_LEVELS).default('info')),
-  TRUST_PROXY: env(flag.default(false)),
+  // MCPRoute is meant to run behind a reverse proxy (e.g. Caddy), which sets X-Forwarded-*.
+  TRUST_PROXY: env(flag.default(true)),
   COOKIE_SECURE: env(z.enum(['auto', 'true', 'false']).default('auto')),
   WEB_DIST_DIR: env(z.string().optional()),
 });
@@ -114,6 +130,10 @@ export function parseConfig(source: Record<string, string | undefined>, baseDir:
     adminUsername: values.ADMIN_USERNAME,
     adminPassword: values.ADMIN_PASSWORD,
     sessionTtlMinutes: values.SESSION_TTL_MINUTES,
+    upstreamConnectTimeoutMs: values.UPSTREAM_CONNECT_TIMEOUT_MS,
+    upstreamCallTimeoutMs: values.UPSTREAM_CALL_TIMEOUT_MS,
+    logRetentionDays: values.LOG_RETENTION_DAYS,
+    proxyCheckUrl: values.PROXY_CHECK_URL,
     logLevel: values.LOG_LEVEL,
     trustProxy: values.TRUST_PROXY,
     cookieSecure: values.COOKIE_SECURE === 'auto' ? 'auto' : values.COOKIE_SECURE === 'true',

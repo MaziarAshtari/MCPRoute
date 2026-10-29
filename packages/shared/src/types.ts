@@ -220,3 +220,53 @@ export interface AssignProxiesResult {
   /** Targeted keys left without a proxy (only in `one_to_one` mode when proxies run out). */
   unassigned: number;
 }
+
+/** POST /api/providers/:id/refresh-tools */
+export interface RefreshToolsResultDto {
+  tools: McpToolDefinition[];
+  toolsFetchedAt: string;
+}
+
+/** POST /api/keys/:id/test */
+export interface KeyTestResultDto {
+  ok: boolean;
+  latencyMs: number;
+  /** Number of tools returned by `tools/list`; null when the test failed. */
+  toolCount: number | null;
+  error: string | null;
+}
+
+/** POST /api/proxies/:id/check */
+export interface ProxyCheckResultDto {
+  proxyId: string;
+  ok: boolean;
+  status: ProxyStatus;
+  /** Public IP address reported by the check service, as seen through the proxy. */
+  exitIp: string | null;
+  latencyMs: number | null;
+  error: string | null;
+  checkedAt: string;
+}
+
+/** POST /api/proxies/check-all */
+export interface ProxyCheckAllResultDto {
+  total: number;
+  ok: number;
+  failed: number;
+  results: ProxyCheckResultDto[];
+}
+
+/** GET /api/stats/overview. Keys in an expired cooldown count as active. */
+export interface StatsOverviewDto {
+  providers: { total: number; enabled: number };
+  keys: KeyStats;
+  proxies: { total: number; enabled: number; ok: number; failed: number; unknown: number };
+  sessions: { active: number };
+  requests24h: {
+    total: number;
+    ok: number;
+    error: number;
+    /** error / total, between 0 and 1 (0 when there were no requests). */
+    errorRate: number;
+  };
+}
