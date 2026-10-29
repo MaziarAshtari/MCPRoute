@@ -41,5 +41,11 @@ export const sessionsQuerySchema = paginationQuerySchema.extend({
 });
 export type SessionsQuery = z.output<typeof sessionsQuerySchema>;
 
+/** GET /api/stats/timeseries: hourly request counts for the last `hours` hours (up to 7 days). */
+export const statsTimeseriesQuerySchema = z.object({
+  hours: z.coerce.number().int().min(1).max(168).default(24),
+});
+export type StatsTimeseriesQuery = z.output<typeof statsTimeseriesQuerySchema>;
+
 /** MCP session ids are opaque strings issued by the gateway. */
 export const sessionIdParamsSchema = z.object({ id: z.string().min(1).max(256) });

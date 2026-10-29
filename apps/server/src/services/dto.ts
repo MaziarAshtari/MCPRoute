@@ -65,6 +65,7 @@ export function toProxyDto(row: ProxyRow, keyCount: number): ProxyDto {
     status: row.status,
     lastCheckedAt: iso(row.lastCheckedAt),
     lastLatencyMs: row.lastLatencyMs,
+    lastExitIp: row.lastExitIp,
     lastError: row.lastError,
     keyCount,
     createdAt: row.createdAt.toISOString(),

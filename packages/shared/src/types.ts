@@ -124,6 +124,8 @@ export interface ProxyDto {
   status: ProxyStatus;
   lastCheckedAt: string | null;
   lastLatencyMs: number | null;
+  /** Public IP address seen through the proxy by the last successful health check. */
+  lastExitIp: string | null;
   lastError: string | null;
   /** Number of API keys currently routed through this proxy. */
   keyCount: number;
@@ -269,4 +271,18 @@ export interface StatsOverviewDto {
     /** error / total, between 0 and 1 (0 when there were no requests). */
     errorRate: number;
   };
+}
+
+export interface RequestTimeseriesBucketDto {
+  /** Start of the bucket (ISO 8601, aligned to the hour). */
+  start: string;
+  total: number;
+  ok: number;
+  error: number;
+}
+
+/** GET /api/stats/timeseries: request counts per hour, oldest bucket first; the last one is the current hour. */
+export interface RequestTimeseriesDto {
+  bucketMinutes: number;
+  buckets: RequestTimeseriesBucketDto[];
 }

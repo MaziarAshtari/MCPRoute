@@ -31,7 +31,13 @@ export function proxyRoutes({ db, config }: AppContext): FastifyPluginAsync {
     const checkedAt = new Date();
     const status = outcome.ok ? 'ok' : 'failed';
     db.update(proxies)
-      .set({ status, lastCheckedAt: checkedAt, lastLatencyMs: outcome.latencyMs, lastError: outcome.error })
+      .set({
+        status,
+        lastCheckedAt: checkedAt,
+        lastLatencyMs: outcome.latencyMs,
+        lastExitIp: outcome.exitIp,
+        lastError: outcome.error,
+      })
       .where(eq(proxies.id, proxy.id))
       .run();
     return {
@@ -105,7 +111,14 @@ export function proxyRoutes({ db, config }: AppContext): FastifyPluginAsync {
       if (patch.url !== undefined && patch.url !== existing.url) {
         assertProxyUrlAvailable(db, patch.url, id);
         // A different proxy: previous health information no longer applies.
-        Object.assign(changes, { url: patch.url, status: 'unknown', lastCheckedAt: null, lastLatencyMs: null, lastError: null });
+        Object.assign(changes, {
+          url: patch.url,
+          status: 'unknown',
+          lastCheckedAt: null,
+          lastLatencyMs: null,
+          lastExitIp: null,
+          lastError: null,
+        });
       }
       if (patch.label !== undefined) changes.label = patch.label;
       if (patch.enabled !== undefined) changes.enabled = patch.enabled;
