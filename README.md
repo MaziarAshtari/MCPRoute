@@ -7,10 +7,9 @@ A self-hosted gateway for [Model Context Protocol](https://modelcontextprotocol.
 - **Endpoints** are MCP servers that MCPRoute exposes at `/mcp/{slug}`. Each one aggregates one or more providers.
 - Keys rotate **per MCP session** (session affinity), not per tool call.
 
-> **Status: step 2 of several.** Step 1 added the data model, the admin REST API and bulk import. Step 2 adds
+> **Status: step 3 of several.** Step 1 added the data model, the admin REST API and bulk import. Step 2 added
 > the MCP gateway engine: `/mcp/{slug}` endpoints, per-session key affinity, per-key proxies, failover, request
-> logging, tool caching, proxy health checks and stats. The real admin UI comes in a later step; the web app is a
-> placeholder page for now.
+> logging, tool caching, proxy health checks and stats. Step 3 adds the [admin web UI](#admin-ui).
 
 ## Tech stack
 
@@ -21,8 +20,9 @@ A self-hosted gateway for [Model Context Protocol](https://modelcontextprotocol.
 | Backend | Fastify 5, pino logging, zod validation |
 | MCP | Official TypeScript SDK (`@modelcontextprotocol/sdk` 1.32), undici + fetch-socks for per-key proxies |
 | Database | SQLite via better-sqlite3 + Drizzle ORM (SQL migrations in `apps/server/drizzle`) |
-| Frontend | React 19, Vite 8, Tailwind CSS 4, shadcn/ui |
-| Tests | Vitest |
+| Frontend | React 19, Vite 8, Tailwind CSS 4, shadcn/ui, React Router 8, TanStack Query 5, React Hook Form + zod, Recharts, sonner |
+| Tests | Vitest (Testing Library + jsdom for the UI) |
+| Lint | oxlint |
 
 ## Project structure
 
@@ -43,7 +43,13 @@ A self-hosted gateway for [Model Context Protocol](https://modelcontextprotocol.
 │   │   │   ├── config.ts       Environment loading and validation
 │   │   │   └── index.ts        Entry point (migrates, then listens)
 │   │   └── test/               API and gateway integration tests (mock upstream MCP server, test proxies)
-│   └── web/                    React + Vite + Tailwind + shadcn/ui (placeholder page)
+│   └── web/                    Admin UI: React + Vite + Tailwind + shadcn/ui
+│       └── src/
+│           ├── components/     Layout (sidebar, theme), shared widgets, shadcn/ui components (ui/)
+│           ├── lib/            API client, query client, formatters, client config snippets
+│           ├── pages/          One folder or file per page (providers, endpoints, proxies, logs, ...)
+│           ├── queries/        TanStack Query hooks per REST resource
+│           └── test/           Vitest + Testing Library tests with a mocked API
 ├── packages/
 │   └── shared/                 zod schemas, DTO types, constants, bulk-import parsers
 ├── scripts/
@@ -129,6 +135,38 @@ Changing `ADMIN_USERNAME`, `ADMIN_PASSWORD` or `MASTER_KEY` signs out existing a
 | `pnpm db:generate` | Generate a new SQL migration after changing `apps/server/src/db/schema.ts` |
 | `pnpm test` | Run all Vitest suites |
 | `pnpm typecheck` | Type-check every package |
+| `pnpm lint` | Lint the repository with oxlint (`.oxlintrc.json`) |
+
+## Admin UI
+
+The web UI is served by the same Fastify process, on the same origin as the API: open http://localhost:3000 (or
+http://localhost:5173 with `pnpm dev`) and sign in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. Any `401` from the
+API, for example once the 24-hour admin session expires, returns to the login page. *Log out* is in the user menu.
+
+| Page | What you can do |
+| --- | --- |
+| Dashboard | Provider, key, proxy and session counts, requests and error rate of the last 24 hours, requests and errors per hour |
+| Providers | Create and edit providers: the form follows the transport and auth mode; presets for Exa, Tavily, Firecrawl and Brave Search; rotation, failover, cooldown and failure rules |
+| Provider detail | **API keys**: status, proxy, usage, errors, sessions and last error; enable, disable, edit, test, reset cooldown and delete, per key or in bulk; add one key or paste many (`key`, `key\|proxyUrl`, `key\|proxyUrl\|label`); assign proxies. **Tools**: the cached tool list with input schemas, refresh |
+| Proxies | Import a list, check one or all (with progress), see latency, exit IP and key count, enable, disable, edit and delete |
+| Endpoints | Create and edit endpoints, link providers with per-provider tool allow and deny lists, regenerate the token. The detail page has copy-ready URLs and configurations for Claude Desktop (via `mcp-remote`), Cursor, VS Code and any Streamable HTTP client |
+| Sessions | Active MCP sessions with the key bound for each provider; terminate a session |
+| Logs | Filter by endpoint, provider, key, status and date range, auto-refresh every 5 seconds, expand a row for the full error |
+
+- The endpoint access token is shown **once**, in a dialog, right after creating the endpoint or regenerating its
+  token. Elsewhere the client snippets use the placeholder `<YOUR_TOKEN>`.
+- Full API keys and proxy passwords are never displayed: the API only returns masked values.
+- Light, dark or system theme (system by default); the layout adapts to phones.
+- The provider presets were checked against the providers' documentation in October 2026. Firecrawl's hosted
+  server now takes the key as a bearer token, so its preset uses `https://mcp.firecrawl.dev/v2/mcp` with
+  `Authorization: Bearer {{API_KEY}}` instead of a key in the URL path.
+
+| | |
+| --- | --- |
+| ![Dashboard](docs/screenshots/dashboard.png) | ![API keys of a provider](docs/screenshots/provider-keys.png) |
+| ![Connect section of an endpoint](docs/screenshots/endpoint-connect.png) | ![Logs](docs/screenshots/logs.png) |
+
+More screenshots are in [`docs/screenshots`](docs/screenshots).
 
 ## Admin REST API
 
@@ -156,15 +194,18 @@ validated with the zod schemas in `packages/shared`. Errors look like
 | `PUT` | `/api/endpoints/:id/providers` | Replace linked providers and their tool filters |
 | `POST` | `/api/providers/:id/refresh-tools` | Fetch `tools/list` with one available key and store it as the tool cache → `{ tools, toolsFetchedAt }` (409 without a usable key, 502 on upstream errors) |
 | `POST` | `/api/keys/:id/test` | Connect upstream with this key and its proxy, run `tools/list` → `{ ok, latencyMs, toolCount, error }` |
-| `POST` | `/api/proxies/:id/check` | Fetch `PROXY_CHECK_URL` through the proxy, store the health → `{ proxyId, ok, status, exitIp, latencyMs, error, checkedAt }` |
+| `POST` | `/api/proxies/:id/check` | Fetch `PROXY_CHECK_URL` through the proxy, store the health (status, latency, exit IP, error) → `{ proxyId, ok, status, exitIp, latencyMs, error, checkedAt }` |
 | `POST` | `/api/proxies/check-all` | Check every proxy (10 at a time) → `{ total, ok, failed, results[] }` |
 | `GET` | `/api/logs` | Request logs: `page`, `pageSize`, `endpointId`, `providerId`, `apiKeyId`, `status`, `from`, `to` |
 | `GET` | `/api/sessions` | Active MCP sessions with their bound keys (`page`, `pageSize`, `endpointId`) |
 | `DELETE` | `/api/sessions/:id` | End a session: release its key bindings and close its live connections |
 | `GET` | `/api/stats/overview` | Providers, keys by status, proxies by status, active sessions, requests and error rate (last 24 h) |
+| `GET` | `/api/stats/timeseries` | Requests and errors per hour, oldest first: `?hours=` (1–168, default 24) → `{ bucketMinutes, buckets: [{ start, total, ok, error }] }`. Buckets are aligned to the hour; the last one is the current hour |
 | `GET` | `/healthz` | Public health check |
 
-Proxy checks only update the proxy's status; they never disable proxies or keys. The key test and tool refresh
+Proxy checks only update the proxy's health; they never disable proxies or keys. Proxies expose the result of
+the last check as `status`, `lastCheckedAt`, `lastLatencyMs`, `lastExitIp` (the public IP seen through the proxy;
+`null` when the check failed) and `lastError`; changing a proxy's URL resets them. The key test and tool refresh
 use the stored key without changing its counters or cooldown.
 
 ### Example
@@ -421,8 +462,9 @@ the `ports` mapping if MCPRoute should only be reachable through Caddy.
 ## Testing
 
 ```bash
-pnpm test        # shared parser tests, unit tests, API and gateway integration tests
+pnpm test        # shared parser tests, unit tests, API and gateway integration tests, web UI tests
 pnpm typecheck
+pnpm lint
 ```
 
 The gateway tests start an in-process upstream MCP server (Streamable HTTP and legacy SSE, built with the SDK), a
@@ -430,3 +472,7 @@ stdio MCP server, and local HTTP CONNECT and SOCKS5 proxies. They cover session 
 sessions after a restart, idle expiry, tool prefixing and filters, the tool cache, prompts and resources, failover
 on HTTP 429 and on quota errors in tool results, per-key proxies, token authentication (header and query), the
 legacy SSE transport, keep-alive pings, and the new admin routes.
+
+The web UI tests (`apps/web/src/test`) render the whole app against a mocked admin API with Vitest, Testing
+Library and jsdom. They cover signing in and the redirect on `401`, creating providers from presets (including
+validation with the shared schemas), and bulk key import.

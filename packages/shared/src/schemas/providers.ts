@@ -12,7 +12,7 @@ import {
 import { nameSchema, nullableText, slugSchema, slugify } from './common';
 
 const HEADER_NAME_PATTERN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
-const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+export const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const QUERY_PARAM_PATTERN = /^[^\s&=#?]+$/;
 
 function isValidRegex(source: string): boolean {
